@@ -110,6 +110,50 @@ def install_wireplumber():
     return True
 
 
+MIX_SINKS = (
+    ("openwave_personal_mix", "OpenWave Personal Mix"),
+    ("openwave_chat_mix", "OpenWave Chat Mix"),
+    ("openwave_record_mix", "OpenWave Record Mix"),
+)
+
+
+def _mix_sink_exists(name):
+    """Return True if a PipeWire/Pulse sink with this name is already live."""
+    try:
+        r = subprocess.run(
+            ["pactl", "list", "short", "sinks"],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return False
+    return any(line.split("\t", 2)[1] == name for line in r.stdout.splitlines() if "\t" in line)
+
+
+def _create_mix_sink_live(name, description):
+    """Spawn a null sink immediately so it appears without a PipeWire restart."""
+    if _mix_sink_exists(name):
+        return
+    args = (
+        "{ "
+        "factory.name=support.null-audio-sink "
+        f"node.name={name} "
+        f'node.description="{description}" '
+        "media.class=Audio/Sink "
+        "audio.position=[FL FR] "
+        "object.linger=true "
+        "}"
+    )
+    try:
+        subprocess.run(
+            ["pw-cli", "create-node", "adapter", args],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        # pw-cli unavailable or PipeWire not reachable — the config file
+        # we just wrote will take effect on next PipeWire load.
+        pass
+
+
 def install_mixes():
     """Drop the three virtual mix sinks into the user's PipeWire config."""
     for src in MIXES_SOURCES:
@@ -125,6 +169,8 @@ def install_mixes():
     os.makedirs(os.path.dirname(MIXES_PATH), exist_ok=True)
     with open(MIXES_PATH, "w") as f:
         f.write(content)
+    for name, desc in MIX_SINKS:
+        _create_mix_sink_live(name, desc)
     return True
 
 
