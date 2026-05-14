@@ -4,7 +4,7 @@ import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 
-from gi.repository import Gtk, Adw, GLib, Gio, Gdk
+from gi.repository import Gtk, Adw, GLib, GObject, Gio, Gdk
 import logging
 import os
 import sys
@@ -47,16 +47,39 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Reconnect")
         refresh_btn.connect("clicked", lambda _: self._try_connect())
         header.pack_end(refresh_btn)
+
+        # Sidebar toggle (placed at the end so it sits next to the close button)
+        self.sidebar_toggle = Gtk.ToggleButton(
+            icon_name="sidebar-show-symbolic",
+            tooltip_text="Toggle device panel",
+            active=True,
+        )
+        header.pack_end(self.sidebar_toggle)
         box.append(header)
 
-        # Two-pane split: matrix (left) | device controls (right)
-        panes = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, vexpand=True)
-        box.append(panes)
+        # --- Split view: matrix (content) | device controls (sidebar) ---------
+        self.split = Adw.OverlaySplitView(
+            sidebar_position=Gtk.PackType.END,
+            min_sidebar_width=320,
+            max_sidebar_width=420,
+            sidebar_width_fraction=0.30,
+            vexpand=True,
+        )
+        box.append(self.split)
 
-        # --- Left pane: mix matrix --------------------------------------------
+        self.sidebar_toggle.bind_property(
+            "active", self.split, "show-sidebar",
+            GObject.BindingFlags.BIDIRECTIONAL | GObject.BindingFlags.SYNC_CREATE,
+        )
+
+        # Auto-collapse the sidebar into an overlay on narrow windows.
+        bp = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 900sp"))
+        bp.add_setter(self.split, "collapsed", True)
+        self.add_breakpoint(bp)
+
+        # --- Content: mix matrix ---------------------------------------------
         self.matrix = MixMatrix()
-        self.matrix.set_hexpand(True)
-        panes.append(self.matrix)
+        self.split.set_content(self.matrix)
 
         self.matrix.add_mix(
             "personal", title="Personal Mix",
@@ -82,24 +105,23 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.mic_source.connect("volume-changed", self._on_mic_matrix_volume_changed)
         self.mic_source.connect("mute-toggled", self._on_mic_matrix_mute_toggled)
 
-        # --- Vertical separator -----------------------------------------------
-        panes.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
-
-        # --- Right pane: device controls --------------------------------------
-        right_scroll = Gtk.ScrolledWindow(vexpand=True)
-        right_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        right_scroll.set_size_request(360, -1)
-        panes.append(right_scroll)
-
-        right_clamp = Adw.Clamp(
-            maximum_size=360,
+        # --- Sidebar: device controls -----------------------------------------
+        sidebar_scroll = Gtk.ScrolledWindow(
+            vexpand=True,
+            hscrollbar_policy=Gtk.PolicyType.NEVER,
+            vscrollbar_policy=Gtk.PolicyType.AUTOMATIC,
+        )
+        sidebar_clamp = Adw.Clamp(
+            maximum_size=380,
             margin_start=12, margin_end=12, margin_top=12, margin_bottom=12,
         )
-        right_scroll.set_child(right_clamp)
+        sidebar_scroll.set_child(sidebar_clamp)
 
-        right_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        right_clamp.set_child(right_content)
-        self._build_device_pane(right_content)
+        sidebar_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        sidebar_clamp.set_child(sidebar_content)
+        self._build_device_pane(sidebar_content)
+
+        self.split.set_sidebar(sidebar_scroll)
 
     def _build_device_pane(self, parent):
         """Populate the right-hand column with Audio / Mic / HP / Device Info groups."""
