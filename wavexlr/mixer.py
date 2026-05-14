@@ -9,11 +9,32 @@ State is persisted to ~/.config/openwave/mixes.json so per-cell levels survive
 restarts (the loopbacks themselves do not — they're respawned by start()).
 """
 
+import atexit
+import ctypes
 import json
 import os
+import signal
 import subprocess
 import time
 from threading import Lock
+
+# Linux-only: make spawned children receive SIGTERM if our process dies.
+# Survives SIGKILL on the parent, hard crashes, anything that skips Python
+# cleanup paths. Without this, pw-loopback children leak on unclean exit.
+_PR_SET_PDEATHSIG = 1
+try:
+    _libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    _libc.prctl.argtypes = (
+        ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong,
+    )
+    _libc.prctl.restype = ctypes.c_int
+except (OSError, AttributeError):
+    _libc = None
+
+
+def _set_pdeathsig():
+    if _libc is not None:
+        _libc.prctl(_PR_SET_PDEATHSIG, int(signal.SIGTERM), 0, 0, 0)
 
 CONFIG_PATH = os.path.expanduser("~/.config/openwave/mixes.json")
 
@@ -133,6 +154,9 @@ class Mixer:
         self._sources = {}
         self._streams = {}
         self.mic, self.hp = find_wave_xlr_alsa()
+        # Belt-and-suspenders: even if do_shutdown is skipped, the interpreter
+        # almost always runs atexit before the process image goes away.
+        atexit.register(self._atexit_cleanup)
 
     # ----- persistence -----
     def _load_state(self):
@@ -170,6 +194,7 @@ class Mixer:
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                preexec_fn=_set_pdeathsig,
             )
         except (FileNotFoundError, OSError):
             return
@@ -181,9 +206,25 @@ class Mixer:
             return
         try:
             proc.terminate()
+        except (OSError, ProcessLookupError):
+            return
+        try:
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            try:
+                proc.kill()
+                proc.wait(timeout=1)
+            except (OSError, ProcessLookupError, subprocess.TimeoutExpired):
+                pass
+
+    def _atexit_cleanup(self):
+        """Fast best-effort tear-down on interpreter exit. No locking, no waits."""
+        for proc in list(self._procs.values()):
+            try:
+                proc.terminate()
+            except (OSError, ProcessLookupError):
+                continue
+        self._procs.clear()
 
     # ----- public API -----
     def start(self):
