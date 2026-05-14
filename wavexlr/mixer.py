@@ -109,6 +109,23 @@ def _wpctl(*args):
         pass
 
 
+def _ports(direction_flag, node_name):
+    """Return the list of `node:port` strings for one direction of a node.
+
+    direction_flag is '-i' (inputs) or '-o' (outputs). Filters pw-link's
+    global output to ports whose node.name equals `node_name`.
+    """
+    try:
+        r = subprocess.run(
+            ["pw-link", direction_flag],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return []
+    prefix = f"{node_name}:"
+    return [line.strip() for line in r.stdout.splitlines() if line.strip().startswith(prefix)]
+
+
 def list_audio_streams():
     """Return [{id, app_name, media_name, node_name}, ...] for active output streams."""
     import json as _json
@@ -182,15 +199,28 @@ class Mixer:
         return dict(self._state)
 
     # ----- subprocess lifecycle -----
-    def _spawn_loopback(self, key, capture_target, playback_target, node_name):
+    def _spawn_loopback(self, key, capture_source_name, playback_target, node_name):
+        """Spawn a pw-loopback and *manually* link the capture side to
+        `capture_source_name`'s output ports. We disable autoconnect on capture
+        because the session manager will otherwise hijack the loopback by
+        wiring the default source (the Wave XLR mic) into it whenever
+        target.object can't be resolved to a Source node — which is exactly
+        the case for null-sink monitors. The link is set up after a brief
+        wait so the node has time to register.
+        """
         if key in self._procs:
             return
+        capture_node_name = f"{node_name}_cap"
         try:
             proc = subprocess.Popen(
                 [
                     "pw-loopback",
-                    f"--capture-props=target.object={capture_target}",
-                    f"--playback-props=target.object={playback_target} node.name={node_name}",
+                    "--capture-props="
+                    f"node.autoconnect=false node.name={capture_node_name} "
+                    "audio.channels=2 audio.position=[FL,FR]",
+                    "--playback-props="
+                    f"target.object={playback_target} node.name={node_name} "
+                    "audio.channels=2 audio.position=[FL,FR]",
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -199,6 +229,29 @@ class Mixer:
         except (FileNotFoundError, OSError):
             return
         self._procs[key] = proc
+        self._link_capture(capture_source_name, capture_node_name)
+
+    @staticmethod
+    def _link_capture(source_node_name, capture_node_name, retries=20):
+        """Wire each output port of `source_node_name` to a corresponding
+        input port of `capture_node_name`. Mono → stereo duplicates."""
+        for _ in range(retries):
+            src_ports = _ports("-o", source_node_name)
+            dst_ports = _ports("-i", capture_node_name)
+            if src_ports and dst_ports:
+                break
+            time.sleep(0.05)
+        else:
+            return
+        for i, dst in enumerate(dst_ports):
+            src = src_ports[i % len(src_ports)]
+            try:
+                subprocess.run(
+                    ["pw-link", src, dst],
+                    capture_output=True, text=True, timeout=2,
+                )
+            except (FileNotFoundError, subprocess.SubprocessError):
+                return
 
     def _destroy_loopback(self, key):
         proc = self._procs.pop(key, None)
@@ -365,8 +418,11 @@ class Mixer:
         for stream_id in matching_stream_ids:
             key = (source_id, mix_id, stream_id)
             node_name = f"openwave_loop_{source_id}_{mix_id}_{stream_id}"
+            stream_node_name = self._streams.get(stream_id, {}).get("node_name", "")
+            if not stream_node_name:
+                continue
             if key not in self._procs:
-                self._spawn_loopback(key, str(stream_id), mix_sink, node_name)
+                self._spawn_loopback(key, stream_node_name, mix_sink, node_name)
             node_id = _node_id_by_name(node_name)
             if node_id is not None:
                 _wpctl("set-volume", node_id, f"{volume:.3f}")

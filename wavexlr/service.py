@@ -142,8 +142,9 @@ def _daemon_proc_alive():
             cmdline = (entry / "cmdline").read_bytes()
         except (OSError, PermissionError):
             continue
-        parts = cmdline.split(b"\0")
-        if b"wavexlr.daemon" in parts:
+        # The daemon is launched as `python3 -c "from wavexlr.daemon import main; main()"`;
+        # "wavexlr.daemon" sits inside the -c argument, so use substring match.
+        if b"wavexlr.daemon" in cmdline:
             return True
     return False
 
