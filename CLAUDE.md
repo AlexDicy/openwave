@@ -7,11 +7,14 @@ null sinks + pw-loopback subprocesses for the mixer routing.
 ## Repo
 
 - `github.com/rikkichy/openwave`, default branch `main`.
-- Active work branch: `mix-matrix-ui` — carries the Wave-Link-style matrix
-  redesign (phases 1 → 3b). Should merge to `main` when stabilised.
-- `watchdog-hardening` branch has uncommitted byte-flow watchdog changes
-  to `wavexlr/audio.py` + `wavexlr/daemon.py` that are unrelated to the
-  matrix work; rebase or merge to keep history clean.
+- `main` now contains the full Wave-Link-style matrix (phases 1 → 4)
+  fast-forwarded from `mix-matrix-ui`. The mix-matrix-ui branch is
+  redundant once that fast-forward shipped — delete locally + on origin
+  when convenient.
+- `watchdog-hardening` branch has stashed byte-flow watchdog changes
+  to `wavexlr/audio.py` + `wavexlr/daemon.py` (stash@{0}) that are
+  unrelated to the matrix work; rebase onto main or commit + push
+  separately when the watchdog work resumes.
 
 Local dev tree: `/opt/openwave`. Site-packages install via
 `pkexec make install PREFIX=/usr/local` is what the live `openwave`
@@ -206,6 +209,41 @@ log/run scripts as a here-doc into a pkexec sh wrapper
   ~16 KB/s of pipe I/O per meter and is bulletproof across PW versions;
   adding a Python binding is a maintenance burden disproportionate to
   the saving.
+
+## HP volume range — slider vs firmware vs ALSA
+
+Three different ranges in play:
+
+| Layer | Range | Notes |
+|-------|-------|-------|
+| Firmware (USB ctrl Q8.8) | −128 dB … 0 dB | int16 full range, −32768 … 0 |
+| ALSA driver (PCM Playback Volume) | −60 dB … 0 dB | exposed as values 0…120 |
+| OpenWave slider | −60 dB … 0 dB | matches ALSA, plus a behavioural reason |
+
+The slider intentionally stops at −60 dB even though the firmware would
+accept down to −128. The hardware knob on the Wave XLR jumps from −128
+to −60 with **nothing in between** when rotated past minimum, so there
+is no real-world way to land in the −128…−60 zone except as "knob at
+the very bottom". Exposing it on a continuous slider would put 50% of
+the travel into useless territory.
+
+`WaveXLR.set_hp_volume_db` still clamps to −128 (so the firmware-side
+API has full fidelity); only the GUI's `Gtk.Adjustment` enforces −60.
+When the hardware knob is bottomed out, `_apply_state` does:
+
+- `self.hp_scale.set_value(state["hp_volume_db"])` — Gtk clamps to −60
+- `self.hp_label.set_label(f"{state['hp_volume_db']:.1f} dB")` — shows
+  the raw firmware value (e.g. `−128.0 dB`)
+
+The deliberate slider/label mismatch is a visual cue that the hardware
+knob is at its very bottom, not just at −60. Don't "fix" it by clamping
+the label too.
+
+The ALSA↔firmware sync logic in `device.py` already tolerates the
+firmware going below ALSA's range: `_fw_hp_to_alsa` saturates at 0
+(= −60 dB) and the sync only writes back to firmware when the *user*
+moves ALSA, not when ALSA's value disagrees with firmware due to
+saturation.
 
 ## Things worth knowing that aren't obvious from the code
 
