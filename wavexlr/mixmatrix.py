@@ -213,9 +213,19 @@ class SourceCell(Gtk.Box):
 
         self._level = None
         if has_level:
-            self._level = Gtk.Image.new_from_icon_name("audio-input-microphone-symbolic")
-            self._level.add_css_class("success")
-            self._level.set_valign(Gtk.Align.CENTER)
+            self._level = Gtk.LevelBar(
+                orientation=Gtk.Orientation.HORIZONTAL,
+                mode=Gtk.LevelBarMode.CONTINUOUS,
+                min_value=0.0,
+                max_value=1.0,
+                valign=Gtk.Align.CENTER,
+            )
+            self._level.set_size_request(56, 8)
+            self._level.add_css_class("openwave-level")
+            # Color stops: green up to 0.7, amber to 0.9, red above.
+            self._level.add_offset_value(Gtk.LEVEL_BAR_OFFSET_LOW, 0.70)
+            self._level.add_offset_value(Gtk.LEVEL_BAR_OFFSET_HIGH, 0.90)
+            self._level.add_offset_value(Gtk.LEVEL_BAR_OFFSET_FULL, 1.00)
             inner.append(self._level)
 
         if removable:
@@ -233,6 +243,11 @@ class SourceCell(Gtk.Box):
         """Update the master slider without firing the changed signal."""
         with GObject.signal_handler_block(self._scale, self._scale_handler):
             self._scale.set_value(max(0.0, min(1.0, value)))
+
+    def set_level(self, value):
+        """Update the audio activity meter (0.0–1.0). No-op if not enabled."""
+        if self._level is not None:
+            self._level.set_value(max(0.0, min(1.0, value)))
 
     def set_muted(self, muted):
         """Update the mute toggle without firing its signal."""

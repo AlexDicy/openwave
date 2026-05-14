@@ -198,6 +198,11 @@ class Mixer:
     def cells(self):
         return dict(self._state)
 
+    def streams(self):
+        """Snapshot of currently-known PipeWire output streams (id → info)."""
+        with self._lock:
+            return dict(self._streams)
+
     # ----- subprocess lifecycle -----
     def _spawn_loopback(self, key, capture_source_name, playback_target, node_name):
         """Spawn a pw-loopback and *manually* link the capture side to

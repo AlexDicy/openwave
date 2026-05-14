@@ -11,6 +11,7 @@ import sys
 import threading
 
 from .device import WaveXLR
+from .meter import MeterMonitor
 from .mixer import Mixer
 from .mixmatrix import MixMatrix
 from .sourcedialog import AddSourceDialog
@@ -39,7 +40,10 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.mixer = Mixer()
         self.mixer.set_sources(self._sources)
         self.mixer.start()
+        self.meter = MeterMonitor()
+        self._meter_targets = {}
         self._wire_matrix_cells()
+        self._start_meters()
         self._start_stream_poll()
         self._try_connect()
 
@@ -120,7 +124,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
                 source_id,
                 name=source.get("name", source_id),
                 icon_name=source.get("icon_name", "applications-multimedia-symbolic"),
-                has_level=False,
+                has_level=True,
                 removable=True,
             )
 
@@ -456,7 +460,50 @@ class WaveXLRWindow(Adw.ApplicationWindow):
 
     def _stream_poll_tick(self):
         self.mixer.poll_streams()
+        for source_id in list(self._sources.keys()):
+            self._refresh_app_meter(source_id)
         return True
+
+    def _start_meters(self):
+        """Begin metering the mic + any app source that already has a matching stream."""
+        if self.mixer.mic:
+            self.meter.start(
+                "mic", self.mixer.mic,
+                lambda level: self._set_source_level("mic", level),
+            )
+        for source_id in self._sources.keys():
+            self._refresh_app_meter(source_id)
+
+    def _refresh_app_meter(self, source_id):
+        """Re-point the meter at the first currently-matching stream, or stop it
+        if none match. Called on stream-poll changes and source add."""
+        source = self._sources.get(source_id)
+        if not source:
+            return
+        match = source.get("match_app_name")
+        streams = self.mixer.streams()
+        candidate = next(
+            (s for s in streams.values() if s.get("app_name") == match), None,
+        )
+        current = self._meter_targets.get(source_id)
+        if candidate is None:
+            if current is not None:
+                self.meter.stop(source_id)
+                self._meter_targets.pop(source_id, None)
+                self._set_source_level(source_id, 0.0)
+            return
+        if current == candidate["id"]:
+            return  # already metering this stream
+        self.meter.start(
+            source_id, candidate["node_name"],
+            lambda level, sid=source_id: self._set_source_level(sid, level),
+        )
+        self._meter_targets[source_id] = candidate["id"]
+
+    def _set_source_level(self, source_id, level):
+        cell = self.matrix.source(source_id)
+        if cell is not None:
+            cell.set_level(level)
 
     def _on_add_source_clicked(self, _matrix):
         dialog = AddSourceDialog()
@@ -472,7 +519,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             source["id"],
             name=source["name"],
             icon_name=source["icon_name"],
-            has_level=False,
+            has_level=True,
             removable=True,
         )
         self._wire_cell(source["id"], "personal")
@@ -480,6 +527,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._wire_cell(source["id"], "record")
         self.mixer.set_sources(self._sources)
         self.mixer.poll_streams()
+        self._refresh_app_meter(source["id"])
 
     def _on_remove_source_clicked(self, _matrix, source_id):
         source = self._sources.get(source_id, {})
@@ -498,6 +546,8 @@ class WaveXLRWindow(Adw.ApplicationWindow):
     def _on_remove_response(self, dialog, result, source_id):
         if dialog.choose_finish(result) != "remove":
             return
+        self.meter.stop(source_id)
+        self._meter_targets.pop(source_id, None)
         self.matrix.remove_source(source_id)
         self._sources = sources_module.remove(self._sources, source_id)
         self.mixer.remove_source(source_id)
@@ -566,9 +616,12 @@ class WaveXLRApp(Adw.Application):
             )
 
     def do_shutdown(self):
-        """Tear down loopback subprocesses before the process exits."""
-        if self._window is not None and hasattr(self._window, "mixer"):
-            self._window.mixer.stop()
+        """Tear down loopback + meter subprocesses before the process exits."""
+        if self._window is not None:
+            if hasattr(self._window, "meter"):
+                self._window.meter.stop_all()
+            if hasattr(self._window, "mixer"):
+                self._window.mixer.stop()
         Adw.Application.do_shutdown(self)
 
     def _on_close_request(self, window):
