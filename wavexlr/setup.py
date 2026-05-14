@@ -19,6 +19,15 @@ WIREPLUMBER_PATH = os.path.expanduser(
     "~/.config/wireplumber/wireplumber.conf.d/51-openwave-wave-xlr.conf"
 )
 
+MIXES_SOURCES = (
+    os.path.join(_APP_DIR, "pipewire", "52-openwave-mixes.conf"),
+    "/usr/local/share/openwave/pipewire/52-openwave-mixes.conf",
+    "/usr/share/openwave/pipewire/52-openwave-mixes.conf",
+)
+MIXES_PATH = os.path.expanduser(
+    "~/.config/pipewire/pipewire.conf.d/52-openwave-mixes.conf"
+)
+
 
 def udev_installed():
     for path in (UDEV_PATH, UDEV_PATH_OLD):
@@ -39,11 +48,16 @@ def wireplumber_installed():
     return os.path.exists(WIREPLUMBER_PATH)
 
 
+def mixes_installed():
+    return os.path.exists(MIXES_PATH)
+
+
 def needs_setup():
     return (
         not udev_installed()
         or not service_installed()
         or not wireplumber_installed()
+        or not mixes_installed()
     )
 
 
@@ -96,6 +110,24 @@ def install_wireplumber():
     return True
 
 
+def install_mixes():
+    """Drop the three virtual mix sinks into the user's PipeWire config."""
+    for src in MIXES_SOURCES:
+        if os.path.exists(src):
+            with open(src) as f:
+                content = f.read()
+            break
+    else:
+        raise FileNotFoundError(
+            "Mix sinks config source not found. Looked in: "
+            + ", ".join(MIXES_SOURCES)
+        )
+    os.makedirs(os.path.dirname(MIXES_PATH), exist_ok=True)
+    with open(MIXES_PATH, "w") as f:
+        f.write(content)
+    return True
+
+
 def run_setup():
     """Run full first-time setup. Returns (success, message)."""
     messages = []
@@ -117,6 +149,15 @@ def run_setup():
         except Exception as e:
             return False, f"Failed to install WirePlumber rule: {e}"
 
+    if not mixes_installed():
+        try:
+            install_mixes()
+            messages.append(
+                "Mix sinks installed (restart PipeWire to apply)"
+            )
+        except Exception as e:
+            return False, f"Failed to install mix sinks: {e}"
+
     if not service_installed():
         try:
             install_service()
@@ -136,6 +177,15 @@ def uninstall_wireplumber():
     """Remove the WirePlumber rule from the user's config."""
     try:
         os.unlink(WIREPLUMBER_PATH)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def uninstall_mixes():
+    """Remove the mix sinks config from the user's PipeWire config."""
+    try:
+        os.unlink(MIXES_PATH)
     except FileNotFoundError:
         return False
     return True
@@ -173,6 +223,10 @@ def run_uninstall():
     if wireplumber_installed():
         if uninstall_wireplumber():
             messages.append("WirePlumber rule removed")
+
+    if mixes_installed():
+        if uninstall_mixes():
+            messages.append("Mix sinks removed")
 
     if udev_installed():
         if uninstall_udev():
