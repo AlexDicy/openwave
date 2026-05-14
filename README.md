@@ -16,29 +16,41 @@ Linux control application for the **Elgato Wave XLR** microphone interface. A re
 
 The Wave XLR uses USB Class control transfers on endpoint 0 for device configuration. On Linux, `snd-usb-audio` normally blocks these transfers because `wIndex=0x3300` routes through interface 0 (owned by the audio driver). OpenWave uses `wIndex=0x3303` instead — the firmware only checks the `0x33` prefix, while the kernel sees interface 3 (unclaimed) and lets the transfer through. No driver detach needed, audio is never interrupted.
 
-## Requirements
+## Install
+
+One-liner — detects Arch, Debian/Ubuntu, Fedora, openSUSE, or Void; installs deps and OpenWave:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rikkichy/openwave/main/install.sh | sh
+```
+
+Or from a checkout:
+
+```bash
+git clone https://github.com/rikkichy/openwave.git
+cd openwave
+./install.sh                  # default PREFIX=/usr/local
+PREFIX=/usr ./install.sh      # for packaging-style layout
+```
+
+Uninstall:
+
+```bash
+sudo make -C /path/to/openwave uninstall PREFIX=/usr/local
+```
+
+### Requirements
 
 - Python 3.10+
 - GTK4, libadwaita
 - PipeWire (for audio capture fix)
 - libusb 1.0
 
-On Arch/CachyOS:
-```bash
-sudo pacman -S gtk4 libadwaita python-gobject pipewire
-```
-
-On Void Linux:
-```bash
-sudo xbps-install -S gtk4 libadwaita python3-gobject pipewire
-```
-
 ## Usage
 
 ```bash
-git clone https://github.com/rikkichy/openwave.git
-cd openwave
-python3 -m wavexlr
+openwave            # if installed via install.sh / PKGBUILD
+python3 -m wavexlr  # from a checkout, no install needed
 ```
 
 On first launch, OpenWave will prompt to set up USB permissions (via polkit) and install the audio service.
