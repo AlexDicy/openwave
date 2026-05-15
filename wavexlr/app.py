@@ -33,6 +33,9 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._stream_poll_id = None
         self._gain_timeout = None
         self._hp_timeout = None
+        # Debounce slider events to coalesce a flurry of value-changed signals
+        # during a drag into one set_cell. {(source_id, mix_id): timeout_id}.
+        self._cell_debounce_ids = {}
         self._sources = sources_module.load()
 
         self._build_ui()
@@ -552,9 +555,25 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._sources = sources_module.remove(self._sources, source_id)
         self.mixer.remove_source(source_id)
 
+    _CELL_DEBOUNCE_MS = 150
+
     def _on_cell_volume_changed(self, _cell, value, source_id, mix_id):
+        # During a drag, value-changed fires continuously; coalesce into a
+        # single set_cell after the slider settles.
+        key = (source_id, mix_id)
+        prev = self._cell_debounce_ids.pop(key, None)
+        if prev is not None:
+            GLib.source_remove(prev)
+        self._cell_debounce_ids[key] = GLib.timeout_add(
+            self._CELL_DEBOUNCE_MS,
+            self._flush_cell_volume, source_id, mix_id, value,
+        )
+
+    def _flush_cell_volume(self, source_id, mix_id, value):
+        self._cell_debounce_ids.pop((source_id, mix_id), None)
         cur = self.mixer.get_cell(source_id, mix_id)
         self.mixer.set_cell(source_id, mix_id, value, cur["muted"])
+        return False  # one-shot
 
     def _on_cell_mute_toggled(self, _cell, muted, source_id, mix_id):
         cur = self.mixer.get_cell(source_id, mix_id)

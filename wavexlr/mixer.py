@@ -12,11 +12,15 @@ restarts (the loopbacks themselves do not — they're respawned by start()).
 import atexit
 import ctypes
 import json
+import logging
 import os
 import signal
 import subprocess
+import threading
 import time
-from threading import Lock
+from threading import Event, Lock
+
+_log = logging.getLogger(__name__)
 
 # Linux-only: make spawned children receive SIGTERM if our process dies.
 # Survives SIGKILL on the parent, hard crashes, anything that skips Python
@@ -171,9 +175,47 @@ class Mixer:
         self._sources = {}
         self._streams = {}
         self.mic, self.hp = find_wave_xlr_alsa()
+
+        # Background worker: every operation that talks to pw-loopback /
+        # pw-cli / wpctl runs here so the GTK main thread never blocks on a
+        # subprocess. Pending work is a dict keyed by (kind, …) so successive
+        # set_cell calls on the same cell collapse to a single reconcile.
+        self._pending = {}
+        self._pending_lock = Lock()
+        self._wake = Event()
+        self._worker_running = True
+        self._worker = threading.Thread(
+            target=self._worker_loop, name="openwave-mixer", daemon=True,
+        )
+        self._worker.start()
+
         # Belt-and-suspenders: even if do_shutdown is skipped, the interpreter
         # almost always runs atexit before the process image goes away.
         atexit.register(self._atexit_cleanup)
+
+    # ----- worker thread -----
+    def _enqueue(self, key, task):
+        """Coalesce a task by key. Latest task for the same key wins."""
+        with self._pending_lock:
+            self._pending[key] = task
+            self._wake.set()
+
+    def _worker_loop(self):
+        while self._worker_running:
+            self._wake.wait(timeout=1.0)
+            while True:
+                with self._pending_lock:
+                    if not self._pending:
+                        self._wake.clear()
+                        break
+                    key = next(iter(self._pending))
+                    task = self._pending.pop(key)
+                try:
+                    task()
+                except Exception:
+                    _log.exception("mixer task failed: %s", key)
+            if not self._worker_running:
+                return
 
     # ----- persistence -----
     def _load_state(self):
@@ -284,22 +326,93 @@ class Mixer:
                 continue
         self._procs.clear()
 
-    # ----- public API -----
-    def start(self):
-        """Spawn always-on Personal→HP loopback, snapshot streams, restore cells.
+    # Below this, the slider snaps to 0 — sub-1% values keep the loopback alive
+    # at imperceptible-but-not-silent volume and confuse "I put it back to 0".
+    _ZERO_THRESHOLD = 0.01
 
-        First, sweep stale pw-loopback children from prior runs that didn't shut
-        down cleanly (kill -9, crash, log-out before atexit) — without this they
-        accumulate across launches and silently produce audio feedback.
-        """
-        self._sweep_stale_loopbacks()
+    # ----- public API (returns immediately; subprocess work runs on worker) -----
+    def start(self):
+        """Spawn always-on Personal→HP loopback, snapshot streams, restore cells."""
+        self._enqueue(("start",), self._do_start)
+
+    def stop(self):
+        """Stop the worker and tear down every loopback. Brief block expected."""
+        self._worker_running = False
+        self._wake.set()
+        try:
+            self._worker.join(timeout=3)
+        except RuntimeError:
+            pass
         with self._lock:
-            if self.hp:
-                self._spawn_loopback(
-                    HP_LOOPBACK_KEY, PERSONAL_MIX_SINK, self.hp, HP_LOOPBACK_NODE,
-                )
+            for key in list(self._procs.keys()):
+                self._destroy_loopback(key)
+
+    def set_cell(self, source_id, mix_id, volume, muted):
+        """Persist state synchronously; reconcile the cell on the worker."""
+        volume = max(0.0, min(1.0, float(volume)))
+        if volume < self._ZERO_THRESHOLD:
+            volume = 0.0
+        with self._lock:
+            self._state[f"{source_id}.{mix_id}"] = {
+                "volume": volume, "muted": bool(muted),
+            }
+            self._save_state()
+        self._enqueue(
+            ("cell", source_id, mix_id),
+            lambda sid=source_id, mid=mix_id: self._reconcile_cell(sid, mid),
+        )
+
+    def set_sources(self, sources):
+        """Update the app-source configuration; reconcile on worker."""
+        with self._lock:
+            self._sources = dict(sources)
+        self._enqueue(("set_sources",), self._reconcile_all)
+
+    def remove_source(self, source_id):
+        """Forget persisted cells now; tear down loopbacks on worker."""
+        with self._lock:
+            prefix = f"{source_id}."
+            for cell_key in [k for k in self._state if k.startswith(prefix)]:
+                del self._state[cell_key]
+            self._save_state()
+            self._sources.pop(source_id, None)
+        self._enqueue(
+            ("remove", source_id),
+            lambda sid=source_id: self._do_remove_source(sid),
+        )
+
+    def poll_streams(self):
+        """Refresh the active-stream cache; reconcile on worker if anything moved.
+
+        Returns (added, removed) stream-id sets for the caller's bookkeeping."""
+        new = {s["id"]: s for s in list_audio_streams()}
+        with self._lock:
+            added = set(new) - set(self._streams)
+            removed = set(self._streams) - set(new)
+            self._streams = new
+        if added or removed:
+            self._enqueue(("poll",), self._reconcile_all)
+        return added, removed
+
+    # ----- worker-side implementations -----
+    def _do_start(self):
+        self._sweep_stale_loopbacks()
+        if self.hp:
+            self._spawn_loopback(
+                HP_LOOPBACK_KEY, PERSONAL_MIX_SINK, self.hp, HP_LOOPBACK_NODE,
+            )
+        with self._lock:
             self._streams = {s["id"]: s for s in list_audio_streams()}
-            self._reconcile_all()
+        self._reconcile_all()
+
+    def _do_remove_source(self, source_id):
+        with self._lock:
+            keys = [
+                k for k in self._procs
+                if isinstance(k, tuple) and k and k[0] == source_id
+            ]
+        for k in keys:
+            self._destroy_loopback(k)
 
     @staticmethod
     def _sweep_stale_loopbacks():
@@ -311,56 +424,6 @@ class Mixer:
         except (FileNotFoundError, subprocess.SubprocessError):
             return
         time.sleep(0.2)  # give the kernel a beat to reap so we don't race
-
-    def stop(self):
-        with self._lock:
-            for key in list(self._procs.keys()):
-                self._destroy_loopback(key)
-
-    # Below this, the slider snaps to 0 — sub-1% values keep the loopback alive
-    # at imperceptible-but-not-silent volume and confuse "I put it back to 0".
-    _ZERO_THRESHOLD = 0.01
-
-    def set_cell(self, source_id, mix_id, volume, muted):
-        volume = max(0.0, min(1.0, float(volume)))
-        if volume < self._ZERO_THRESHOLD:
-            volume = 0.0
-        with self._lock:
-            self._state[f"{source_id}.{mix_id}"] = {
-                "volume": volume, "muted": bool(muted),
-            }
-            self._save_state()
-            self._reconcile_cell(source_id, mix_id)
-
-    def set_sources(self, sources):
-        """Update the app-source configuration; reconciles loopbacks."""
-        with self._lock:
-            self._sources = dict(sources)
-            self._reconcile_all()
-
-    def remove_source(self, source_id):
-        """Tear down all loopbacks for a source and forget its persisted cells."""
-        with self._lock:
-            for key in list(self._procs.keys()):
-                if isinstance(key, tuple) and key and key[0] == source_id:
-                    self._destroy_loopback(key)
-            prefix = f"{source_id}."
-            for cell_key in [k for k in self._state if k.startswith(prefix)]:
-                del self._state[cell_key]
-            self._save_state()
-            self._sources.pop(source_id, None)
-
-    def poll_streams(self):
-        """Refresh the active-stream cache and adjust loopbacks. Returns the
-        diff (added, removed) of stream ids for the caller's bookkeeping."""
-        new = {s["id"]: s for s in list_audio_streams()}
-        with self._lock:
-            added = set(new) - set(self._streams)
-            removed = set(self._streams) - set(new)
-            self._streams = new
-            if added or removed:
-                self._reconcile_all()
-        return added, removed
 
     # ----- internal -----
     def _reconcile_all(self):
