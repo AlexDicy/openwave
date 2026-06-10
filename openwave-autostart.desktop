@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=OpenWave
+Comment=Elgato Wave Control for Linux
+Exec=openwave --hide
+Icon=audio-input-microphone
+Type=Application
+Categories=Audio;Settings;

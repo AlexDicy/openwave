@@ -20,6 +20,7 @@ install:
 	printf '#!/bin/sh\nexec %s -m wavexlr "$$@"\n' "$(PYTHON)" > $(BINDIR)/openwave
 	chmod 755 $(BINDIR)/openwave
 	install -Dm644 wavexlr.desktop $(DESKTOPDIR)/openwave.desktop
+	install -Dm644 openwave-autostart.desktop $(APPDIR)/openwave-autostart.desktop
 	install -Dm644 wireplumber/51-openwave-wave-xlr.conf $(APPDIR)/wireplumber/51-openwave-wave-xlr.conf
 	install -Dm644 pipewire/52-openwave-mixes.conf $(APPDIR)/pipewire/52-openwave-mixes.conf
 	install -Dm644 README.md $(DOCDIR)/README.md

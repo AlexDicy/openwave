@@ -77,7 +77,12 @@ OpenWave detects your init system at runtime:
 
 ### Start hidden in tray
 ```bash
-python3 -m wavexlr -- --hide
+python3 -m wavexlr --hide
+```
+
+### Start at login
+```bash
+cp /usr/share/openwave/openwave-autostart.desktop ~/.config/autostart/
 ```
 
 ### Desktop entry
