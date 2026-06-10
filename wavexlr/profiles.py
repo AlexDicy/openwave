@@ -37,6 +37,7 @@ class DeviceProfile:
     card_match: tuple
     sync_alsa_mute: bool
     sync_alsa_hp: bool
+    sync_alsa_gain: bool
 
     @property
     def has_low_z(self):
@@ -82,6 +83,7 @@ WAVE_XLR = DeviceProfile(
     card_match=("Wave XLR", "Elgato"),
     sync_alsa_mute=True,
     sync_alsa_hp=True,
+    sync_alsa_gain=False,
 )
 
 # Verified on hardware (fw 1.2.2): 16-byte config — gain uint16 Q8.8 dB @0,
@@ -119,6 +121,7 @@ WAVE3 = DeviceProfile(
     card_match=("Wave3", "Elgato"),
     sync_alsa_mute=True,
     sync_alsa_hp=True,
+    sync_alsa_gain=True,
 )
 
 PROFILES = (WAVE_XLR, WAVE3)

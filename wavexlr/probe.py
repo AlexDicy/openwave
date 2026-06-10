@@ -8,6 +8,9 @@
 dump with no --wvalue reads the profile's config/meter/devinfo blocks and
 reports the actual returned lengths. watch polls the config block and prints
 per-offset byte diffs while you twiddle the hardware controls.
+
+The device services vendor transfers from only one process at a time — quit
+OpenWave (including the tray icon) before probing, or reads fail with -EIO.
 """
 
 import argparse

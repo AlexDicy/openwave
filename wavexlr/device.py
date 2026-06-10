@@ -94,6 +94,17 @@ def _alsa_set_hp_vol(card, value):
     _amixer(card, "cset", "numid=4", str(max(0, min(120, value))))
 
 
+def _alsa_set_gain(card, value):
+    """Set ALSA mic gain (numid=6, 0-80)."""
+    _amixer(card, "cset", "numid=6", str(max(0, min(80, value))))
+
+
+def _fw_gain_to_alsa(fw_gain_raw, scale):
+    """Map firmware gain (raw / scale dB) to ALSA (0-80, 0.5 dB steps)."""
+    db = fw_gain_raw / scale
+    return max(0, min(80, round(db / 0.5)))
+
+
 def _fw_hp_to_alsa(fw_hp_raw, scale):
     """Map firmware HP to ALSA (0-120).
 
@@ -251,12 +262,19 @@ class WaveDevice:
                         struct.pack_into(p.hp_fmt, config, p.off_hp_vol, fw_hp)
                         dirty = True
 
+                # --- Gain (push only: ALSA writes mirror back into firmware) ---
+                if p.sync_alsa_gain:
+                    if fw_gain != self._last_fw["gain"]:
+                        _alsa_set_gain(self._card, _fw_gain_to_alsa(fw_gain, p.gain_scale))
+
             else:
                 # First poll — sync firmware state to ALSA
                 if p.sync_alsa_mute:
                     _alsa_set_mute(self._card, fw_mute)
                 if p.sync_alsa_hp:
                     _alsa_set_hp_vol(self._card, _fw_hp_to_alsa(fw_hp, p.hp_scale))
+                if p.sync_alsa_gain:
+                    _alsa_set_gain(self._card, _fw_gain_to_alsa(fw_gain, p.gain_scale))
 
             if dirty:
                 self.write_config(config)
@@ -287,6 +305,8 @@ class WaveDevice:
         self.write_config(config)
         if self._last_fw:
             self._last_fw["gain"] = value
+        if self._card and self.profile.sync_alsa_gain:
+            _alsa_set_gain(self._card, _fw_gain_to_alsa(value, self.profile.gain_scale))
 
     def set_mute(self, muted):
         config = self.read_config()
