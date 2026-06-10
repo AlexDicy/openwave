@@ -52,7 +52,6 @@ class DeviceProfile:
         return self.off_monitor_mix is not None
 
 
-# Values identical to the pre-refactor device.py constants (v1.0.0).
 WAVE_XLR = DeviceProfile(
     key="wave_xlr",
     display_name="Wave XLR",
@@ -61,7 +60,7 @@ WAVE_XLR = DeviceProfile(
     wvalue_config=0x0000,
     wvalue_meter=0x0001,
     wvalue_devinfo=0x000A,
-    windex=0x3303,
+    windex=0x3303,  # 0x3303 not 0x3300 — bypasses snd-usb-audio ownership check
     config_len=34,
     meter_len=10,
     devinfo_len=51,
@@ -86,11 +85,6 @@ WAVE_XLR = DeviceProfile(
     sync_alsa_gain=False,
 )
 
-# Verified on hardware (fw 1.2.2): 16-byte config — gain uint16 Q8.8 dB @0,
-# mute @4, HP volume int16 Q8.8 @7, monitor mix uint16 Q8.8 percent @10
-# (0..0x6400), dial mode @12 (1=gain, 2=hp, 3=mix). ALSA csets mirror into
-# the config block but not the reverse, same one-way coupling as the XLR.
-# Bytes 3 and 5 never moved during probing (Clipguard candidates).
 WAVE3 = DeviceProfile(
     key="wave3",
     display_name="Wave:3",
@@ -99,7 +93,7 @@ WAVE3 = DeviceProfile(
     wvalue_config=0x0000,
     wvalue_meter=0x0001,
     wvalue_devinfo=0x000A,
-    windex=0x3303,
+    windex=0x3303,  # 0x3303 not 0x3300 — bypasses snd-usb-audio ownership check
     config_len=16,
     meter_len=8,
     devinfo_len=64,
