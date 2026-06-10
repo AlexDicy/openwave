@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=OpenWave
-Comment=Elgato Wave XLR Control for Linux
+Comment=Elgato Wave Control for Linux
 Exec=python3 -m wavexlr
 Icon=audio-input-microphone
 Type=Application

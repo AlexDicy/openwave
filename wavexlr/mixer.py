@@ -67,12 +67,12 @@ def find_wave_xlr_alsa():
     """Return (mic_node_name, hp_node_name); either may be None if unplugged."""
     mic = next(
         (p[1] for p in _pactl_short("sources")
-         if len(p) > 1 and p[1].startswith("alsa_input") and "Wave_XLR" in p[1]),
+         if len(p) > 1 and p[1].startswith("alsa_input") and "Elgato_Wave_" in p[1]),
         None,
     )
     hp = next(
         (p[1] for p in _pactl_short("sinks")
-         if len(p) > 1 and p[1].startswith("alsa_output") and "Wave_XLR" in p[1]),
+         if len(p) > 1 and p[1].startswith("alsa_output") and "Elgato_Wave_" in p[1]),
         None,
     )
     return mic, hp

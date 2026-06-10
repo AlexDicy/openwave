@@ -1,4 +1,4 @@
-"""OpenWave — GTK4 + Adwaita control application for the Elgato Wave XLR."""
+"""OpenWave — GTK4 + Adwaita control application for Elgato Wave devices."""
 
 import gi
 gi.require_version('Gtk', '4.0')
@@ -10,7 +10,7 @@ import os
 import sys
 import threading
 
-from .device import WaveXLR
+from .device import WaveDevice
 from .meter import MeterMonitor
 from .mixer import Mixer
 from .mixmatrix import MixMatrix
@@ -19,20 +19,22 @@ from . import setup, service, sources as sources_module
 
 logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 
-GAIN_MAX = 0x5000
+KNOB_LABELS = {"gain": "Gain", "hp": "Headphones", "mix": "Monitor Mix"}
 
 
 class WaveXLRWindow(Adw.ApplicationWindow):
     def __init__(self, **kwargs):
         super().__init__(**kwargs, title="OpenWave", default_width=1100, default_height=620)
         self.set_size_request(900, 520)
-        self.xlr = WaveXLR()
+        self.dev = WaveDevice()
+        self._gain_max = 0x5000
         self._updating_ui = False
         self._last_state = None
         self._poll_id = None
         self._stream_poll_id = None
         self._gain_timeout = None
         self._hp_timeout = None
+        self._mix_timeout = None
         # Debounce slider events to coalesce a flurry of value-changed signals
         # during a drag into one set_cell. {(source_id, mix_id): timeout_id}.
         self._cell_debounce_ids = {}
@@ -114,7 +116,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         )
 
         self.mic_source = self.matrix.add_source(
-            "mic", name="Wave XLR",
+            "mic", name="Microphone",
             icon_name="audio-input-microphone-symbolic",
             has_level=True,
         )
@@ -203,6 +205,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.knob_label = Gtk.Label(label="Gain")
         self.knob_label.add_css_class("dim-label")
         knob_row.add_suffix(self.knob_label)
+        self.knob_row = knob_row
         mic_group.add(knob_row)
 
         # --- Headphone controls ---
@@ -230,6 +233,26 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         lowz_row.connect("notify::active", self._on_lowz_changed)
         self.lowz_row = lowz_row
         hp_group.add(lowz_row)
+
+        mix_row = Adw.ActionRow(title="Monitor Mix", subtitle="Mic / PC monitoring balance")
+        self.mix_label = Gtk.Label(label="—", width_chars=8, xalign=1)
+        self.mix_label.add_css_class("monospace")
+        mix_row.add_suffix(self.mix_label)
+        self.mix_row = mix_row
+        mix_row.set_visible(False)
+        hp_group.add(mix_row)
+
+        self.mix_scale = Gtk.Scale(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            hexpand=True,
+            draw_value=False,
+            adjustment=Gtk.Adjustment(lower=0, upper=0x6400, step_increment=0x100, page_increment=0x800),
+        )
+        self.mix_scale.set_margin_start(12)
+        self.mix_scale.set_margin_end(12)
+        self.mix_scale.set_visible(False)
+        self.mix_scale.connect("value-changed", self._on_mix_changed)
+        parent.append(self.mix_scale)
 
         # --- Device info ---
         info_group = Adw.PreferencesGroup(title="Device Info")
@@ -304,16 +327,16 @@ class WaveXLRWindow(Adw.ApplicationWindow):
     def _try_connect(self):
         self.status_label.set_label("Connecting...")
         def _connect():
-            self.xlr.disconnect()
-            self.xlr.connect()
+            self.dev.disconnect()
+            self.dev.connect()
             info = {}
             try:
-                info = self.xlr.read_device_info()
+                info = self.dev.read_device_info()
             except Exception:
                 pass
-            return {"state": self.xlr.get_all(), "info": info}
+            return {"state": self.dev.get_all(), "info": info}
         def _done(result):
-            self.status_label.set_label("OpenWave")
+            self._apply_profile(self.dev.profile)
             self.status_label.remove_css_class("dim-label")
             self._apply_state(result["state"])
             info = result["info"]
@@ -339,11 +362,11 @@ class WaveXLRWindow(Adw.ApplicationWindow):
 
     def _poll_tick(self):
         """Called every 100ms — read device state in background."""
-        if not self.xlr.connected:
+        if not self.dev.connected:
             self._poll_id = None
             return False  # stop polling
         # Only poll if not already busy with a user-initiated write
-        self._usb_async(self.xlr.get_all, self._on_poll_result, self._on_poll_error)
+        self._usb_async(self.dev.get_all, self._on_poll_result, self._on_poll_error)
         return True  # keep polling
 
     def _on_poll_result(self, state):
@@ -353,8 +376,27 @@ class WaveXLRWindow(Adw.ApplicationWindow):
     def _on_poll_error(self, e):
         self.status_label.set_label("Disconnected")
         self.status_label.add_css_class("dim-label")
-        self.xlr.disconnect()
+        self.dev.disconnect()
         self._stop_polling()
+
+    def _apply_profile(self, profile):
+        """Adapt the UI to the connected device model."""
+        self._gain_max = profile.gain_max
+        self.gain_scale.get_adjustment().set_upper(profile.gain_max)
+        self.knob_row.set_visible(profile.has_vol_select)
+        self.lowz_row.set_visible(profile.has_low_z)
+        self.mix_row.set_visible(profile.has_monitor_mix)
+        self.mix_scale.set_visible(profile.has_monitor_mix)
+        if profile.has_monitor_mix:
+            self.mix_scale.get_adjustment().set_upper(profile.mix_max)
+        self.mic_source.set_name(profile.display_name)
+        self.status_label.set_label(f"OpenWave — {profile.display_name}")
+
+    def _format_gain(self, raw):
+        scale = self.dev.profile.gain_scale if self.dev.profile else None
+        if scale:
+            return f"{raw / scale:.1f} dB"
+        return f"0x{raw:04X}"
 
     def _apply_state(self, state):
         """Update UI from device state dict (must be called on GTK thread)."""
@@ -362,32 +404,37 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._last_state = state
         self.mute_row.set_active(state["mute"])
         self.gain_scale.set_value(state["gain_raw"])
-        self.gain_label.set_label(f"0x{state['gain_raw']:04X}")
+        self.gain_label.set_label(self._format_gain(state["gain_raw"]))
         self.hp_scale.set_value(state["hp_volume_db"])
         self.hp_label.set_label(f"{state['hp_volume_db']:.1f} dB")
-        self.lowz_row.set_active(state["low_impedance"])
-        self.knob_label.set_label("Headphones" if state["volume_select"] == "hp" else "Gain")
-        self.mic_source.set_volume(state["gain_raw"] / GAIN_MAX)
+        if "low_impedance" in state:
+            self.lowz_row.set_active(state["low_impedance"])
+        if "volume_select" in state:
+            self.knob_label.set_label(KNOB_LABELS.get(state["volume_select"], "Gain"))
+        if "monitor_mix" in state:
+            self.mix_scale.set_value(state["monitor_mix"])
+            self.mix_label.set_label(f"{state['monitor_mix'] / 256:.0f}%")
+        self.mic_source.set_volume(state["gain_raw"] / self._gain_max)
         self.mic_source.set_muted(state["mute"])
         self._updating_ui = False
 
     def _on_usb_error(self, e):
         self.status_label.set_label("Disconnected")
         self.status_label.add_css_class("dim-label")
-        self.xlr.disconnect()
+        self.dev.disconnect()
         self._stop_polling()
 
     def _on_mute_changed(self, row, _pspec):
-        if self._updating_ui or not self.xlr.connected:
+        if self._updating_ui or not self.dev.connected:
             return
         muted = row.get_active()
-        self._usb_async(lambda: self.xlr.set_mute(muted), on_error=self._on_usb_error)
+        self._usb_async(lambda: self.dev.set_mute(muted), on_error=self._on_usb_error)
 
     def _on_gain_changed(self, scale):
-        if self._updating_ui or not self.xlr.connected:
+        if self._updating_ui or not self.dev.connected:
             return
         val = int(scale.get_value())
-        self.gain_label.set_label(f"0x{val:04X}")
+        self.gain_label.set_label(self._format_gain(val))
         # Debounce — only send after slider stops moving for 200ms
         if hasattr(self, '_gain_timeout') and self._gain_timeout:
             GLib.source_remove(self._gain_timeout)
@@ -395,11 +442,11 @@ class WaveXLRWindow(Adw.ApplicationWindow):
 
     def _send_gain(self, val):
         self._gain_timeout = None
-        self._usb_async(lambda: self.xlr.set_gain_raw(val), on_error=self._on_usb_error)
+        self._usb_async(lambda: self.dev.set_gain_raw(val), on_error=self._on_usb_error)
         return False
 
     def _on_hp_changed(self, scale):
-        if self._updating_ui or not self.xlr.connected:
+        if self._updating_ui or not self.dev.connected:
             return
         db = scale.get_value()
         self.hp_label.set_label(f"{db:.1f} dB")
@@ -409,20 +456,34 @@ class WaveXLRWindow(Adw.ApplicationWindow):
 
     def _send_hp(self, db):
         self._hp_timeout = None
-        self._usb_async(lambda: self.xlr.set_hp_volume_db(db), on_error=self._on_usb_error)
+        self._usb_async(lambda: self.dev.set_hp_volume_db(db), on_error=self._on_usb_error)
         return False
 
     def _on_lowz_changed(self, row, _pspec):
-        if self._updating_ui or not self.xlr.connected:
+        if self._updating_ui or not self.dev.connected:
             return
         enabled = row.get_active()
-        self._usb_async(lambda: self.xlr.set_low_impedance(enabled), on_error=self._on_usb_error)
+        self._usb_async(lambda: self.dev.set_low_impedance(enabled), on_error=self._on_usb_error)
+
+    def _on_mix_changed(self, scale):
+        if self._updating_ui or not self.dev.connected:
+            return
+        val = int(scale.get_value())
+        self.mix_label.set_label(f"{val / 256:.0f}%")
+        if self._mix_timeout:
+            GLib.source_remove(self._mix_timeout)
+        self._mix_timeout = GLib.timeout_add(200, self._send_mix, val)
+
+    def _send_mix(self, val):
+        self._mix_timeout = None
+        self._usb_async(lambda: self.dev.set_monitor_mix(val), on_error=self._on_usb_error)
+        return False
 
     def _on_mic_matrix_volume_changed(self, _source, value):
-        if self._updating_ui or not self.xlr.connected:
+        if self._updating_ui or not self.dev.connected:
             return
-        raw = int(value * GAIN_MAX)
-        self.gain_label.set_label(f"0x{raw:04X}")
+        raw = int(value * self._gain_max)
+        self.gain_label.set_label(self._format_gain(raw))
         self._updating_ui = True
         self.gain_scale.set_value(raw)
         self._updating_ui = False
@@ -431,12 +492,12 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._gain_timeout = GLib.timeout_add(200, self._send_gain, raw)
 
     def _on_mic_matrix_mute_toggled(self, _source, muted):
-        if self._updating_ui or not self.xlr.connected:
+        if self._updating_ui or not self.dev.connected:
             return
         self._updating_ui = True
         self.mute_row.set_active(muted)
         self._updating_ui = False
-        self._usb_async(lambda: self.xlr.set_mute(muted), on_error=self._on_usb_error)
+        self._usb_async(lambda: self.dev.set_mute(muted), on_error=self._on_usb_error)
 
     def _wire_matrix_cells(self):
         """Bind each per-cell slider/mute to the mixer + restore persisted levels."""
@@ -661,10 +722,10 @@ class WaveXLRApp(Adw.Application):
         self.hold()
 
     def _toggle_mute(self):
-        if self._window and self._window.xlr.connected:
+        if self._window and self._window.dev.connected:
             current = self._window._last_state and self._window._last_state.get("mute", False)
             self._window._usb_async(
-                lambda: self._window.xlr.set_mute(not current),
+                lambda: self._window.dev.set_mute(not current),
                 on_error=self._window._on_usb_error,
             )
 
@@ -706,7 +767,7 @@ class WaveXLRApp(Adw.Application):
         if success:
             replug_dialog = Adw.AlertDialog(
                 heading="Setup Complete",
-                body=f"{message}.\n\nPlease replug your Wave XLR, then click Continue.",
+                body=f"{message}.\n\nPlease replug your Elgato Wave device, then click Continue.",
             )
             replug_dialog.add_response("continue", "Continue")
             replug_dialog.set_default_response("continue")
@@ -734,7 +795,7 @@ class WaveXLRApp(Adw.Application):
     def do_shutdown(self):
         if self._window:
             self._window._stop_polling()
-            self._window.xlr.disconnect()
+            self._window.dev.disconnect()
         Adw.Application.do_shutdown(self)
 
 

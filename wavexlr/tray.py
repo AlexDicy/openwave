@@ -159,7 +159,7 @@ class TrayIcon:
             "Title": GLib.Variant("s", "OpenWave"),
             "Status": GLib.Variant("s", "Active"),
             "IconName": GLib.Variant("s", "audio-input-microphone-symbolic"),
-            "ToolTip": GLib.Variant("(sa(iiay)ss)", ("", [], "OpenWave", "Elgato Wave XLR Control")),
+            "ToolTip": GLib.Variant("(sa(iiay)ss)", ("", [], "OpenWave", "Elgato Wave Control")),
             "Menu": GLib.Variant("o", "/MenuBar"),
             "ItemIsMenu": GLib.Variant("b", False),
         }

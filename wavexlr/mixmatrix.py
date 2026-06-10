@@ -239,6 +239,9 @@ class SourceCell(Gtk.Box):
             remove_btn.connect("clicked", lambda _: self.emit("remove-clicked"))
             inner.append(remove_btn)
 
+    def set_name(self, name):
+        self._name_lbl.set_label(name)
+
     def set_volume(self, value):
         """Update the master slider without firing the changed signal."""
         with GObject.signal_handler_block(self._scale, self._scale_handler):

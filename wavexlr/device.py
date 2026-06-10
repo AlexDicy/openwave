@@ -1,9 +1,12 @@
-"""Wave XLR USB device backend.
+"""Elgato Wave USB device backend.
 
 Uses raw libusb control transfers with wIndex=0x3303 to bypass the Linux
 kernel's interface routing. The kernel sees interface 3 (unclaimed) and
 lets the transfer through, while the firmware only checks the 0x33 prefix.
 No driver detach needed — audio is never interrupted.
+
+Per-model constants (USB IDs, config offsets, capabilities) live in
+profiles.py; connect() picks the first supported device found.
 """
 
 import ctypes
@@ -12,26 +15,13 @@ import struct
 import subprocess
 import threading
 
-VENDOR_ID = 0x0FD9
-PRODUCT_ID = 0x007D
+from .profiles import PROFILES
 
 BREQUEST_READ = 0x85
 BREQUEST_WRITE = 0x05
-WVALUE_CONFIG = 0x0000
-WVALUE_METER = 0x0001
-WVALUE_DEVINFO = 0x000A
-WINDEX = 0x3303  # 0x3303 not 0x3300 — bypasses snd-usb-audio ownership check
-CONFIG_LEN = 34
-METER_LEN = 10
 
 RT_CLASS_IN = 0xA1
 RT_CLASS_OUT = 0x21
-
-OFF_GAIN = 0
-OFF_MUTE = 4
-OFF_HP_VOL = 9
-OFF_VOL_SELECT = 14
-OFF_LOW_Z = 33
 
 # --- Raw libusb setup ---
 _lib_path = ctypes.util.find_library("usb-1.0") or "libusb-1.0.so.0"
@@ -54,12 +44,12 @@ _ctx = ctypes.c_void_p()
 _lib.libusb_init(ctypes.byref(_ctx))
 
 
-def _find_card():
-    """Find the ALSA card number for the Wave XLR."""
+def _find_card(matches):
+    """Find the ALSA card number for the device."""
     try:
         r = subprocess.run(["aplay", "-l"], capture_output=True, text=True, timeout=3)
         for line in r.stdout.splitlines():
-            if "Wave XLR" in line or "Elgato" in line:
+            if any(m in line for m in matches):
                 return line.split(":")[0].split()[-1]
     except Exception:
         pass
@@ -104,41 +94,45 @@ def _alsa_set_hp_vol(card, value):
     _amixer(card, "cset", "numid=4", str(max(0, min(120, value))))
 
 
-def _fw_hp_to_alsa(fw_hp_raw):
+def _fw_hp_to_alsa(fw_hp_raw, scale):
     """Map firmware HP to ALSA (0-120).
 
-    Firmware: int16 Q8.8, range -32768 (-128 dB) to 0 (0 dB).
+    Firmware: raw / scale dB (XLR: int16 Q8.8, Wave:3: int8 whole-dB).
     ALSA driver caps lower at 0 → -60 dB; anything below saturates.
     ALSA step = 0.5 dB, so dB = (value - 120) * 0.5 → value = dB / 0.5 + 120.
     """
-    db = fw_hp_raw / 256.0
+    db = fw_hp_raw / scale
     return max(0, min(120, round(db / 0.5 + 120)))
 
 
-def _alsa_hp_to_fw(alsa_hp):
-    """Map ALSA HP (0-120) to firmware HP (int16 Q8.8)."""
+def _alsa_hp_to_fw(alsa_hp, scale):
+    """Map ALSA HP (0-120) to firmware HP raw."""
     db = (alsa_hp - 120) * 0.5  # 0→-60, 120→0
     db = max(-128.0, min(0.0, db))  # firmware range
-    return int(db * 256)
+    return int(db * scale)
 
 
-class WaveXLR:
+class WaveDevice:
     def __init__(self):
         self._handle = None
         self._lock = threading.Lock()
         self._card = None
         self._last_fw = None  # last known firmware state for change detection
+        self.profile = None
 
     @property
     def connected(self):
         return self._handle is not None
 
     def connect(self):
-        handle = _lib.libusb_open_device_with_vid_pid(_ctx, VENDOR_ID, PRODUCT_ID)
-        if not handle:
-            raise RuntimeError("Wave XLR not found")
-        self._handle = handle
-        self._card = _find_card()
+        for profile in PROFILES:
+            handle = _lib.libusb_open_device_with_vid_pid(_ctx, profile.vid, profile.pid)
+            if handle:
+                self._handle = handle
+                self.profile = profile
+                self._card = _find_card(profile.card_match)
+                return
+        raise RuntimeError("No supported Elgato Wave device found")
 
     def disconnect(self):
         if self._handle:
@@ -152,7 +146,7 @@ class WaveXLR:
         buf = (ctypes.c_ubyte * length)()
         with self._lock:
             ret = _lib.libusb_control_transfer(
-                self._handle, RT_CLASS_IN, BREQUEST_READ, wValue, WINDEX,
+                self._handle, RT_CLASS_IN, BREQUEST_READ, wValue, self.profile.windex,
                 buf, length, 1000,
             )
         if ret < 0:
@@ -165,58 +159,71 @@ class WaveXLR:
         buf = (ctypes.c_ubyte * len(data))(*data)
         with self._lock:
             ret = _lib.libusb_control_transfer(
-                self._handle, RT_CLASS_OUT, BREQUEST_WRITE, wValue, WINDEX,
+                self._handle, RT_CLASS_OUT, BREQUEST_WRITE, wValue, self.profile.windex,
                 buf, len(data), 1000,
             )
         if ret < 0:
             raise RuntimeError(f"USB write failed (err {ret})")
 
     def read_config(self):
-        return self._ctrl_read(WVALUE_CONFIG, CONFIG_LEN)
+        return self._ctrl_read(self.profile.wvalue_config, self.profile.config_len)
 
     def write_config(self, config):
-        self._ctrl_write(WVALUE_CONFIG, config)
+        self._ctrl_write(self.profile.wvalue_config, config)
 
     def read_meters(self):
-        data = self._ctrl_read(WVALUE_METER, METER_LEN)
+        data = self._ctrl_read(self.profile.wvalue_meter, self.profile.meter_len)
         left = struct.unpack_from('<I', data, 0)[0]
         right = struct.unpack_from('<I', data, 4)[0]
         return left, right
 
     def read_device_info(self):
-        """Read and parse the 51-byte device info block."""
-        data = self._ctrl_read(WVALUE_DEVINFO, 51)
-        serial = bytes(data[27:47]).decode('ascii', errors='replace').rstrip('\x00')
+        """Read and parse the device info block."""
+        p = self.profile
+        data = self._ctrl_read(p.wvalue_devinfo, p.devinfo_len)
+        serial = bytes(data[p.devinfo_serial[0]:p.devinfo_serial[1]]).decode(
+            'ascii', errors='replace').rstrip('\x00')
         return {
-            "api_version": f"{data[0]}.{data[1]}",
-            "fw_version": f"{data[6]}.{data[7]}.{data[8]}",
+            "api_version": f"{data[p.devinfo_api[0]]}.{data[p.devinfo_api[1]]}",
+            "fw_version": f"{data[p.devinfo_fw[0]]}.{data[p.devinfo_fw[1]]}.{data[p.devinfo_fw[2]]}",
             "serial": serial,
         }
 
     # --- High-level getters ---
 
     def get_gain_raw(self):
-        return struct.unpack_from('<H', self.read_config(), OFF_GAIN)[0]
+        return struct.unpack_from('<H', self.read_config(), self.profile.off_gain)[0]
 
     def get_mute(self):
-        return bool(self.read_config()[OFF_MUTE])
+        return bool(self.read_config()[self.profile.off_mute])
 
     def get_hp_volume_db(self):
-        raw = struct.unpack_from('<h', self.read_config(), OFF_HP_VOL)[0]
-        return raw / 256.0
+        p = self.profile
+        raw = struct.unpack_from(p.hp_fmt, self.read_config(), p.off_hp_vol)[0]
+        return raw / p.hp_scale
 
     def get_low_impedance(self):
-        return bool(self.read_config()[OFF_LOW_Z])
+        if self.profile.off_low_z is None:
+            return None
+        return bool(self.read_config()[self.profile.off_low_z])
 
     def get_volume_select(self):
-        val = self.read_config()[OFF_VOL_SELECT]
-        return "hp" if val == 2 else "gain"
+        if self.profile.off_vol_select is None:
+            return None
+        val = self.read_config()[self.profile.off_vol_select]
+        return self.profile.vol_select_map.get(val, "gain")
+
+    def get_monitor_mix(self):
+        if self.profile.off_monitor_mix is None:
+            return None
+        return struct.unpack_from('<H', self.read_config(), self.profile.off_monitor_mix)[0]
 
     def get_all(self):
+        p = self.profile
         config = self.read_config()
-        fw_gain = struct.unpack_from('<H', config, OFF_GAIN)[0]
-        fw_hp = struct.unpack_from('<h', config, OFF_HP_VOL)[0]
-        fw_mute = bool(config[OFF_MUTE])
+        fw_gain = struct.unpack_from('<H', config, p.off_gain)[0]
+        fw_hp = struct.unpack_from(p.hp_fmt, config, p.off_hp_vol)[0]
+        fw_mute = bool(config[p.off_mute])
 
         fw_now = {"mute": fw_mute, "gain": fw_gain, "hp": fw_hp}
 
@@ -227,25 +234,29 @@ class WaveXLR:
 
             if self._last_fw is not None:
                 # --- Mute ---
-                if fw_mute != self._last_fw["mute"]:
-                    _alsa_set_mute(self._card, fw_mute)
-                elif alsa.get("mute") is not None and alsa["mute"] != fw_mute:
-                    config[OFF_MUTE] = 0x01 if alsa["mute"] else 0x00
-                    fw_mute = alsa["mute"]
-                    dirty = True
+                if p.sync_alsa_mute:
+                    if fw_mute != self._last_fw["mute"]:
+                        _alsa_set_mute(self._card, fw_mute)
+                    elif alsa.get("mute") is not None and alsa["mute"] != fw_mute:
+                        config[p.off_mute] = 0x01 if alsa["mute"] else 0x00
+                        fw_mute = alsa["mute"]
+                        dirty = True
 
                 # --- HP volume ---
-                if fw_hp != self._last_fw["hp"]:
-                    _alsa_set_hp_vol(self._card, _fw_hp_to_alsa(fw_hp))
-                elif "hp_vol" in alsa and alsa["hp_vol"] != _fw_hp_to_alsa(self._last_fw["hp"]):
-                    fw_hp = _alsa_hp_to_fw(alsa["hp_vol"])
-                    struct.pack_into('<h', config, OFF_HP_VOL, fw_hp)
-                    dirty = True
+                if p.sync_alsa_hp:
+                    if fw_hp != self._last_fw["hp"]:
+                        _alsa_set_hp_vol(self._card, _fw_hp_to_alsa(fw_hp, p.hp_scale))
+                    elif "hp_vol" in alsa and alsa["hp_vol"] != _fw_hp_to_alsa(self._last_fw["hp"], p.hp_scale):
+                        fw_hp = _alsa_hp_to_fw(alsa["hp_vol"], p.hp_scale)
+                        struct.pack_into(p.hp_fmt, config, p.off_hp_vol, fw_hp)
+                        dirty = True
 
             else:
                 # First poll — sync firmware state to ALSA
-                _alsa_set_mute(self._card, fw_mute)
-                _alsa_set_hp_vol(self._card, _fw_hp_to_alsa(fw_hp))
+                if p.sync_alsa_mute:
+                    _alsa_set_mute(self._card, fw_mute)
+                if p.sync_alsa_hp:
+                    _alsa_set_hp_vol(self._card, _fw_hp_to_alsa(fw_hp, p.hp_scale))
 
             if dirty:
                 self.write_config(config)
@@ -254,45 +265,65 @@ class WaveXLR:
         else:
             self._last_fw = fw_now
 
-        return {
+        state = {
             "gain_raw": fw_gain,
             "mute": fw_mute,
-            "hp_volume_db": fw_hp / 256.0,
-            "volume_select": "hp" if config[OFF_VOL_SELECT] == 2 else "gain",
-            "low_impedance": bool(config[OFF_LOW_Z]),
+            "hp_volume_db": fw_hp / p.hp_scale,
         }
+        if p.off_vol_select is not None:
+            state["volume_select"] = p.vol_select_map.get(config[p.off_vol_select], "gain")
+        if p.off_low_z is not None:
+            state["low_impedance"] = bool(config[p.off_low_z])
+        if p.off_monitor_mix is not None:
+            state["monitor_mix"] = struct.unpack_from('<H', config, p.off_monitor_mix)[0]
+        return state
 
     # --- High-level setters (read-modify-write) ---
 
     def set_gain_raw(self, value):
         value = max(0, min(0xFFFF, value))
         config = self.read_config()
-        struct.pack_into('<H', config, OFF_GAIN, value)
+        struct.pack_into('<H', config, self.profile.off_gain, value)
         self.write_config(config)
         if self._last_fw:
             self._last_fw["gain"] = value
 
     def set_mute(self, muted):
         config = self.read_config()
-        config[OFF_MUTE] = 0x01 if muted else 0x00
+        config[self.profile.off_mute] = 0x01 if muted else 0x00
         self.write_config(config)
         if self._last_fw:
             self._last_fw["mute"] = muted
-        if self._card:
+        if self._card and self.profile.sync_alsa_mute:
             _alsa_set_mute(self._card, muted)
 
     def set_hp_volume_db(self, db):
+        p = self.profile
         db = max(-128.0, min(0.0, db))
-        raw = int(db * 256)
+        raw = int(db * p.hp_scale)
         config = self.read_config()
-        struct.pack_into('<h', config, OFF_HP_VOL, raw)
+        struct.pack_into(p.hp_fmt, config, p.off_hp_vol, raw)
         self.write_config(config)
         if self._last_fw:
             self._last_fw["hp"] = raw
-        if self._card:
-            _alsa_set_hp_vol(self._card, _fw_hp_to_alsa(raw))
+        if self._card and p.sync_alsa_hp:
+            _alsa_set_hp_vol(self._card, _fw_hp_to_alsa(raw, p.hp_scale))
 
     def set_low_impedance(self, enabled):
+        if self.profile.off_low_z is None:
+            return
         config = self.read_config()
-        config[OFF_LOW_Z] = 0x01 if enabled else 0x00
+        config[self.profile.off_low_z] = 0x01 if enabled else 0x00
         self.write_config(config)
+
+    def set_monitor_mix(self, value):
+        p = self.profile
+        if p.off_monitor_mix is None:
+            return
+        value = max(0, min(p.mix_max, int(value)))
+        config = self.read_config()
+        struct.pack_into('<H', config, p.off_monitor_mix, value)
+        self.write_config(config)
+
+
+WaveXLR = WaveDevice

@@ -1,7 +1,7 @@
 """
-Wave XLR PipeWire audio manager.
+Elgato Wave PipeWire audio manager (Wave XLR, Wave:3).
 
-The Wave XLR is a UAC1 USB device whose capture and playback iso endpoints
+These are UAC1 USB devices whose capture and playback iso endpoints
 share a single audio clock. Anything that triggers a format renegotiation
 or stream tear-down on the kernel-side ALSA stream takes both directions
 silent for the duration. WirePlumber's idle-suspend behavior, plus apps
@@ -30,7 +30,7 @@ import logging
 
 log = logging.getLogger("wavexlr.audio")
 
-SOURCE_MATCH = "alsa_input.usb-Elgato_Systems_Elgato_Wave_XLR"
+SOURCE_MATCH = "alsa_input.usb-Elgato_Systems_Elgato_Wave_"
 
 # Seconds without byte flow before we consider the keepalive wedged. At
 # 48 kHz mono s16 the healthy rate is ~96 kB/s, so even 1s of silence is
@@ -71,7 +71,7 @@ def _pw_dump():
 
 
 def _get_source_node_name():
-    """Get the full node name of the Wave XLR source."""
+    """Get the full node name of the Elgato Wave source."""
     for obj in _pw_dump():
         if obj.get("type") != "PipeWire:Interface:Node":
             continue

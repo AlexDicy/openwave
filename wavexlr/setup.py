@@ -5,7 +5,10 @@ import subprocess
 
 from . import service
 
-UDEV_RULE = 'SUBSYSTEM=="usb", ATTR{idVendor}=="0fd9", ATTR{idProduct}=="007d", MODE="0666"'
+UDEV_RULES = (
+    'SUBSYSTEM=="usb", ATTR{idVendor}=="0fd9", ATTR{idProduct}=="007d", MODE="0666"',  # Wave XLR
+    'SUBSYSTEM=="usb", ATTR{idVendor}=="0fd9", ATTR{idProduct}=="0070", MODE="0666"',  # Wave:3
+)
 UDEV_PATH = "/etc/udev/rules.d/99-openwave.rules"
 UDEV_PATH_OLD = "/etc/udev/rules.d/99-wavexlr.rules"
 
@@ -33,8 +36,9 @@ def udev_installed():
     for path in (UDEV_PATH, UDEV_PATH_OLD):
         try:
             with open(path) as f:
-                if "0fd9" in f.read():
-                    return True
+                content = f.read()
+            if all(pid in content for pid in ("007d", "0070")):
+                return True
         except (FileNotFoundError, PermissionError):
             continue
     return False
@@ -45,7 +49,18 @@ def service_installed():
 
 
 def wireplumber_installed():
-    return os.path.exists(WIREPLUMBER_PATH)
+    try:
+        with open(WIREPLUMBER_PATH) as f:
+            installed = f.read()
+    except OSError:
+        return False
+    for src in WIREPLUMBER_SOURCES:
+        try:
+            with open(src) as f:
+                return f.read() == installed
+        except OSError:
+            continue
+    return True
 
 
 def mixes_installed():
@@ -62,11 +77,15 @@ def needs_setup():
 
 
 def install_udev():
-    """Install udev rule via pkexec."""
+    """Install udev rules via pkexec."""
+    rules = "\n".join(UDEV_RULES)
     script = f"""#!/bin/sh
-echo '{UDEV_RULE}' > {UDEV_PATH}
+cat > {UDEV_PATH} <<'EOF'
+{rules}
+EOF
 udevadm control --reload-rules
 udevadm trigger --subsystem-match=usb --attr-match=idVendor=0fd9 --attr-match=idProduct=007d
+udevadm trigger --subsystem-match=usb --attr-match=idVendor=0fd9 --attr-match=idProduct=0070
 # Also chmod the device node directly so no replug is needed
 for dev in /dev/bus/usb/*/; do
     for f in "$dev"*; do
