@@ -15,7 +15,7 @@ from .meter import MeterMonitor
 from .mixer import Mixer
 from .mixmatrix import MixMatrix
 from .sourcedialog import AddSourceDialog
-from . import setup, service, sources as sources_module
+from . import setup, service, settings, sources as sources_module
 
 logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 
@@ -399,6 +399,9 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         if profile.has_monitor_mix:
             self.mix_scale.get_adjustment().set_upper(profile.mix_max)
         self.gain_lock_row.set_visible(profile.sync_alsa_gain)
+        if profile.sync_alsa_gain:
+            self.dev.gain_lock = settings.get("gain_lock", {}).get(
+                profile.key, self.dev.gain_lock)
         self._updating_ui = True
         self.gain_lock_row.set_active(self.dev.gain_lock)
         self._updating_ui = False
@@ -482,6 +485,10 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         if self._updating_ui:
             return
         self.dev.gain_lock = row.get_active()
+        if self.dev.profile:
+            locks = settings.get("gain_lock", {})
+            locks[self.dev.profile.key] = self.dev.gain_lock
+            settings.set("gain_lock", locks)
 
     def _on_mix_changed(self, scale):
         if self._updating_ui or not self.dev.connected:
