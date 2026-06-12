@@ -99,6 +99,18 @@ def _alsa_set_gain(card, value):
     _amixer(card, "cset", "numid=6", str(max(0, min(80, value))))
 
 
+def _alsa_get_gain(card):
+    """Read ALSA mic gain (numid=6, 0-80)."""
+    out = _amixer(card, "cget", "numid=6")
+    for line in out.splitlines():
+        if ": values=" in line:
+            try:
+                return int(line.split("=")[-1])
+            except ValueError:
+                pass
+    return None
+
+
 def _fw_gain_to_alsa(fw_gain_raw, scale):
     """Map firmware gain (raw / scale dB) to ALSA (0-80, 0.5 dB steps)."""
     db = fw_gain_raw / scale
@@ -129,6 +141,8 @@ class WaveDevice:
         self._lock = threading.Lock()
         self._card = None
         self._last_fw = None  # last known firmware state for change detection
+        self._last_alsa_gain = None  # last ALSA gain we saw/wrote — foreign writes differ
+        self.gain_lock = False
         self.profile = None
 
     @property
@@ -142,6 +156,7 @@ class WaveDevice:
                 self._handle = handle
                 self.profile = profile
                 self._card = _find_card(profile.card_match)
+                self.gain_lock = profile.sync_alsa_gain
                 return
         raise RuntimeError("No supported Elgato Wave device found")
 
@@ -151,6 +166,7 @@ class WaveDevice:
             self._handle = None
         self._card = None
         self._last_fw = None
+        self._last_alsa_gain = None
 
     def _ctrl_read(self, wValue, length):
         """USB control read — no detach needed."""
@@ -262,10 +278,25 @@ class WaveDevice:
                         struct.pack_into(p.hp_fmt, config, p.off_hp_vol, fw_hp)
                         dirty = True
 
-                # --- Gain (push only: ALSA writes mirror back into firmware) ---
+                # --- Gain (ALSA writes mirror into firmware; the dial never
+                # moves ALSA, so a changed ALSA value means a foreign write) ---
                 if p.sync_alsa_gain:
-                    if fw_gain != self._last_fw["gain"]:
-                        _alsa_set_gain(self._card, _fw_gain_to_alsa(fw_gain, p.gain_scale))
+                    alsa_gain = _alsa_get_gain(self._card)
+                    foreign = (alsa_gain is not None
+                               and self._last_alsa_gain is not None
+                               and alsa_gain != self._last_alsa_gain)
+                    if self.gain_lock and foreign:
+                        # Revert to the last user-set gain (e.g. browser AGC)
+                        fw_gain = self._last_fw["gain"]
+                        struct.pack_into('<H', config, p.off_gain, fw_gain)
+                        dirty = True
+                        self._last_alsa_gain = _fw_gain_to_alsa(fw_gain, p.gain_scale)
+                        _alsa_set_gain(self._card, self._last_alsa_gain)
+                    elif fw_gain != self._last_fw["gain"]:
+                        self._last_alsa_gain = _fw_gain_to_alsa(fw_gain, p.gain_scale)
+                        _alsa_set_gain(self._card, self._last_alsa_gain)
+                    elif alsa_gain is not None:
+                        self._last_alsa_gain = alsa_gain
 
             else:
                 # First poll — sync firmware state to ALSA
@@ -274,7 +305,8 @@ class WaveDevice:
                 if p.sync_alsa_hp:
                     _alsa_set_hp_vol(self._card, _fw_hp_to_alsa(fw_hp, p.hp_scale))
                 if p.sync_alsa_gain:
-                    _alsa_set_gain(self._card, _fw_gain_to_alsa(fw_gain, p.gain_scale))
+                    self._last_alsa_gain = _fw_gain_to_alsa(fw_gain, p.gain_scale)
+                    _alsa_set_gain(self._card, self._last_alsa_gain)
 
             if dirty:
                 self.write_config(config)
@@ -306,7 +338,8 @@ class WaveDevice:
         if self._last_fw:
             self._last_fw["gain"] = value
         if self._card and self.profile.sync_alsa_gain:
-            _alsa_set_gain(self._card, _fw_gain_to_alsa(value, self.profile.gain_scale))
+            self._last_alsa_gain = _fw_gain_to_alsa(value, self.profile.gain_scale)
+            _alsa_set_gain(self._card, self._last_alsa_gain)
 
     def set_mute(self, muted):
         config = self.read_config()

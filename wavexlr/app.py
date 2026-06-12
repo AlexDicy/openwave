@@ -208,6 +208,15 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.knob_row = knob_row
         mic_group.add(knob_row)
 
+        gain_lock_row = Adw.SwitchRow(
+            title="Gain Lock",
+            subtitle="Prevent other apps from changing the gain",
+        )
+        gain_lock_row.connect("notify::active", self._on_gain_lock_changed)
+        self.gain_lock_row = gain_lock_row
+        gain_lock_row.set_visible(False)
+        mic_group.add(gain_lock_row)
+
         # --- Headphone controls ---
         hp_group = Adw.PreferencesGroup(title="Headphones")
         parent.append(hp_group)
@@ -389,6 +398,10 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.mix_scale.set_visible(profile.has_monitor_mix)
         if profile.has_monitor_mix:
             self.mix_scale.get_adjustment().set_upper(profile.mix_max)
+        self.gain_lock_row.set_visible(profile.sync_alsa_gain)
+        self._updating_ui = True
+        self.gain_lock_row.set_active(self.dev.gain_lock)
+        self._updating_ui = False
         self.mic_source.set_name(profile.display_name)
         self.status_label.set_label(f"OpenWave — {profile.display_name}")
 
@@ -464,6 +477,11 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             return
         enabled = row.get_active()
         self._usb_async(lambda: self.dev.set_low_impedance(enabled), on_error=self._on_usb_error)
+
+    def _on_gain_lock_changed(self, row, _pspec):
+        if self._updating_ui:
+            return
+        self.dev.gain_lock = row.get_active()
 
     def _on_mix_changed(self, scale):
         if self._updating_ui or not self.dev.connected:

@@ -7,7 +7,7 @@ Linux control application for **Elgato Wave** audio devices — the **Wave XLR**
 | Device | USB ID | Controls |
 |---|---|---|
 | Wave XLR | `0fd9:007d` | Gain, mute, headphone volume, low impedance mode |
-| Wave:3 | `0fd9:0070` | Gain, mute, headphone volume, monitor mix |
+| Wave:3 | `0fd9:0070` | Gain, mute, headphone volume, monitor mix, gain lock |
 
 ## Features
 
@@ -15,6 +15,7 @@ Linux control application for **Elgato Wave** audio devices — the **Wave XLR**
 - **Headphone controls** — Volume (syncs with hardware knob), low impedance mode
 - **Hardware sync** — 10 Hz polling keeps the app in sync with physical controls
 - **System integration** — Mute and HP volume sync bidirectionally with PipeWire/ALSA
+- **Gain Lock** (Wave:3) — reverts mic gain changes made by other software (e.g. browser auto-gain-control), since the firmware applies any ALSA capture-volume write to the physical preamp; togglable, dial and app changes always win
 - **Audio capture fix** — Background daemon (systemd or runit) prevents the firmware race condition where mic goes silent
 - **System tray** — Runs in background with tray icon, mute from tray menu
 - **First-run setup** — Configures udev permissions and audio service automatically
