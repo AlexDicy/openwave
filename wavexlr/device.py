@@ -322,6 +322,7 @@ class WaveDevice:
         }
         if p.off_vol_select is not None:
             state["volume_select"] = p.vol_select_map.get(config[p.off_vol_select], "gain")
+            state["volume_select_raw"] = config[p.off_vol_select]
         if p.off_low_z is not None:
             state["low_impedance"] = bool(config[p.off_low_z])
         if p.off_monitor_mix is not None:
@@ -367,6 +368,13 @@ class WaveDevice:
             return
         config = self.read_config()
         config[self.profile.off_low_z] = 0x01 if enabled else 0x00
+        self.write_config(config)
+
+    def set_volume_select(self, value):
+        if self.profile.off_vol_select is None:
+            return
+        config = self.read_config()
+        config[self.profile.off_vol_select] = value & 0xFF
         self.write_config(config)
 
     def set_monitor_mix(self, value):

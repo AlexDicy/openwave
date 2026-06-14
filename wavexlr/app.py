@@ -351,11 +351,17 @@ class WaveXLRWindow(Adw.ApplicationWindow):
                 info = self.dev.read_device_info()
             except Exception:
                 pass
-            # Re-apply the persisted value so gain survives a power cycle
+            # Re-apply persisted values so they survive a power cycle
             saved = settings.get("gain", {}).get(self.dev.profile.key)
             if saved is not None:
                 try:
                     self.dev.set_gain_raw(saved)
+                except Exception:
+                    pass
+            saved_knob = settings.get("knob", {}).get(self.dev.profile.key)
+            if saved_knob is not None:
+                try:
+                    self.dev.set_volume_select(saved_knob)
                 except Exception:
                     pass
             return {"state": self.dev.get_all(), "info": info}
@@ -456,17 +462,19 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.mic_source.set_volume(state["gain_raw"] / self._gain_max)
         self.mic_source.set_muted(state["mute"])
         self._updating_ui = False
-        self._save_gain(state["gain_raw"])
+        self._persist_setting("gain", state["gain_raw"])
+        if "volume_select_raw" in state:
+            self._persist_setting("knob", state["volume_select_raw"])
 
-    def _save_gain(self, raw):
-        """Persist the current gain so it can be re-applied after a power cycle."""
+    def _persist_setting(self, group, value):
+        """Persist a per-device value so it can be re-applied after a power cycle."""
         if not self.dev.profile:
             return
-        gains = settings.get("gain", {})
-        if gains.get(self.dev.profile.key) == raw:
+        data = settings.get(group, {})
+        if data.get(self.dev.profile.key) == value:
             return
-        gains[self.dev.profile.key] = raw
-        settings.set("gain", gains)
+        data[self.dev.profile.key] = value
+        settings.set(group, data)
 
     def _on_usb_error(self, e):
         self.dev.disconnect()
