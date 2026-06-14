@@ -32,6 +32,8 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._last_state = None
         self._poll_id = None
         self._stream_poll_id = None
+        self._reconnect_id = None
+        self._connecting = False
         self._gain_timeout = None
         self._hp_timeout = None
         self._mix_timeout = None
@@ -334,6 +336,12 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _try_connect(self):
+        if self._connecting:
+            return
+        self._connecting = True
+        if self._reconnect_id:
+            GLib.source_remove(self._reconnect_id)
+            self._reconnect_id = None
         self.status_label.set_label("Connecting...")
         def _connect():
             self.dev.disconnect()
@@ -345,6 +353,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
                 pass
             return {"state": self.dev.get_all(), "info": info}
         def _done(result):
+            self._connecting = False
             self._apply_profile(self.dev.profile)
             self.status_label.remove_css_class("dim-label")
             self._apply_state(result["state"])
@@ -354,9 +363,17 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             self.serial_label.set_label(info.get("serial", "—"))
             self._start_polling()
         def _fail(e):
-            self.status_label.set_label("Disconnected")
+            self._connecting = False
+            self.status_label.set_label("Searching for device…")
             self.status_label.add_css_class("dim-label")
+            if self._reconnect_id is None:
+                self._reconnect_id = GLib.timeout_add_seconds(2, self._reconnect_tick)
         self._usb_async(_connect, _done, _fail)
+
+    def _reconnect_tick(self):
+        self._reconnect_id = None
+        self._try_connect()
+        return False  # one-shot; _fail re-arms the timer if still failing
 
     def _start_polling(self):
         """Start 10 Hz polling to sync hardware state."""
@@ -383,10 +400,9 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             self._apply_state(state)
 
     def _on_poll_error(self, e):
-        self.status_label.set_label("Disconnected")
-        self.status_label.add_css_class("dim-label")
         self.dev.disconnect()
         self._stop_polling()
+        self._try_connect()
 
     def _apply_profile(self, profile):
         """Adapt the UI to the connected device model."""
@@ -435,10 +451,9 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._updating_ui = False
 
     def _on_usb_error(self, e):
-        self.status_label.set_label("Disconnected")
-        self.status_label.add_css_class("dim-label")
         self.dev.disconnect()
         self._stop_polling()
+        self._try_connect()
 
     def _on_mute_changed(self, row, _pspec):
         if self._updating_ui or not self.dev.connected:
@@ -820,6 +835,9 @@ class WaveXLRApp(Adw.Application):
     def do_shutdown(self):
         if self._window:
             self._window._stop_polling()
+            if self._window._reconnect_id:
+                GLib.source_remove(self._window._reconnect_id)
+                self._window._reconnect_id = None
             self._window.dev.disconnect()
         Adw.Application.do_shutdown(self)
 
